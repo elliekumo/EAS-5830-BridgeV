@@ -1,7 +1,7 @@
 from web3 import Web3
 from web3.providers.rpc import HTTPProvider
-from web3.middleware import ExtraDataToPOAMiddleware #Necessary for POA chains
-# from web3.middleware import geth_poa_middleware
+# from web3.middleware import ExtraDataToPOAMiddleware #Necessary for POA chains
+from web3.middleware import geth_poa_middleware
 from datetime import datetime
 import json
 import pandas as pd
@@ -17,8 +17,8 @@ def connect_to(chain):
     if chain in ['source','destination']:
         w3 = Web3(Web3.HTTPProvider(api_url))
         # inject the poa compatibility middleware to the innermost layer
-        w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
-        # w3.middleware_onion.inject(geth_poa_middleware, layer=0)
+        # w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+        w3.middleware_onion.inject(geth_poa_middleware, layer=0)
     return w3
 
 
@@ -73,24 +73,49 @@ def scan_blocks(chain, contract_info="contract_info.json"):
     acct = w3_send.eth.account.from_key(sk)
 
     def send_tx(fn):
-        nonce = w3_send.eth.get_transaction_count(acct.address)
+        # always get the next *pending* nonce
+        nonce = w3_send.eth.get_transaction_count(acct.address, 'pending')
+
+        # estimate gas with fallback
         try:
             gas_est = fn.estimate_gas({'from': acct.address})
         except Exception:
             gas_est = 500_000
+
+        # mildly bump gas price to avoid "underpriced" when back-to-back txs
+        gp = int(w3_send.eth.gas_price * 115 // 100)  # +15%
+
         tx = fn.build_transaction({
             'from': acct.address,
             'nonce': nonce,
             'gas': int(gas_est * 1.2),
-            'gasPrice': w3_send.eth.gas_price,
-            'chainId': w3_send.eth.chain_id
+            'gasPrice': gp,
+            'chainId': w3_send.eth.chain_id,
         })
+
         signed = w3_send.eth.account.sign_transaction(tx, acct.key)
-        # v6: use raw_transaction
-        return w3_send.eth.send_raw_transaction(signed.raw_transaction).hex()
+        txh = w3_send.eth.send_raw_transaction(signed.raw_transaction)  # v6 attr
+        return txh.hex()
+
+    # def send_tx(fn):
+    #     nonce = w3_send.eth.get_transaction_count(acct.address)
+    #     try:
+    #         gas_est = fn.estimate_gas({'from': acct.address})
+    #     except Exception:
+    #         gas_est = 500_000
+    #     tx = fn.build_transaction({
+    #         'from': acct.address,
+    #         'nonce': nonce,
+    #         'gas': int(gas_est * 1.2),
+    #         'gasPrice': w3_send.eth.gas_price,
+    #         'chainId': w3_send.eth.chain_id
+    #     })
+    #     signed = w3_send.eth.account.sign_transaction(tx, acct.key)
+    #     # v6: use raw_transaction
+    #     return w3_send.eth.send_raw_transaction(signed.raw_transaction).hex()
 
     latest = w3_scan.eth.block_number
-    from_block = max(latest - 5, 0)
+    from_block = max(latest - 3, 0)
     to_block = latest
 
     if chain == "source":
