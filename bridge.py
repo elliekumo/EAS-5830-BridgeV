@@ -1,7 +1,7 @@
 from web3 import Web3
 from web3.providers.rpc import HTTPProvider
-# from web3.middleware import ExtraDataToPOAMiddleware #Necessary for POA chains
-from web3.middleware import geth_poa_middleware
+from web3.middleware import ExtraDataToPOAMiddleware #Necessary for POA chains
+# from web3.middleware import geth_poa_middleware
 from datetime import datetime
 import json
 import pandas as pd
@@ -17,8 +17,8 @@ def connect_to(chain):
     if chain in ['source','destination']:
         w3 = Web3(Web3.HTTPProvider(api_url))
         # inject the poa compatibility middleware to the innermost layer
-        # w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
-        w3.middleware_onion.inject(geth_poa_middleware, layer=0)
+        w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+        # w3.middleware_onion.inject(geth_poa_middleware, layer=0)
     return w3
 
 
