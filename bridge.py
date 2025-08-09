@@ -35,6 +35,11 @@ def get_contract_info(chain, contract_info):
         return 0
     return contracts[chain]
 
+from eth_utils import to_checksum_address
+
+def _hex0x(x: str) -> str:
+    x = x if isinstance(x, str) else x.hex()
+    return x if x.startswith("0x") else ("0x" + x)
 
 def scan_blocks(chain, contract_info="contract_info.json"):
     """
