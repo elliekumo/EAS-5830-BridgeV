@@ -1,7 +1,7 @@
 from web3 import Web3
 from web3.providers.rpc import HTTPProvider
 from web3.middleware import ExtraDataToPOAMiddleware #Necessary for POA chains
-#from web3.middleware import geth_poa_middleware
+# from web3.middleware import geth_poa_middleware
 from datetime import datetime
 import json
 import pandas as pd
@@ -18,7 +18,7 @@ def connect_to(chain):
         w3 = Web3(Web3.HTTPProvider(api_url))
         # inject the poa compatibility middleware to the innermost layer
         w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
-        #w3.middleware_onion.inject(geth_poa_middleware, layer=0)
+        # w3.middleware_onion.inject(geth_poa_middleware, layer=0)
     return w3
 
 
@@ -59,15 +59,17 @@ def scan_blocks(chain, contract_info="contract_info.json"):
 
     w3_scan = connect_to(chain)
     mine = get_contract_info(chain, contract_info)
-    scan_contract = w3_scan.eth.contract(address=mine["address"], abi=mine["abi"])
+    mine_addr = to_checksum_address(mine["address"])
+    scan_contract = w3_scan.eth.contract(address=mine_addr, abi=mine["abi"])
 
     other_chain = "destination" if chain == "source" else "source"
     w3_send = connect_to(other_chain)
     other = get_contract_info(other_chain, contract_info)
-    send_contract = w3_send.eth.contract(address=other["address"], abi=other["abi"])
+    other_addr = to_checksum_address(other["address"])
+    send_contract = w3_send.eth.contract(address=other_addr, abi=other["abi"])
 
+    # DO NOT strip 0x
     sk = (Path(__file__).parent.absolute() / "sk.txt").read_text().strip()
-    if sk.startswith("0x"): sk = sk[2:]
     acct = w3_send.eth.account.from_key(sk)
 
     def send_tx(fn):
@@ -91,15 +93,19 @@ def scan_blocks(chain, contract_info="contract_info.json"):
     to_block = latest
 
     if chain == "source":
-        topic = Web3.keccak(text="Deposit(address,address,uint256)").hex()
+        topic = _hex0x(Web3.keccak(text="Deposit(address,address,uint256)").hex())
         logs = w3_scan.eth.get_logs({
-            "fromBlock": from_block, "toBlock": to_block,
-            "address": mine["address"], "topics": [topic],
+            "fromBlock": from_block,
+            "toBlock": to_block,
+            "address": mine_addr,
+            "topics": [topic],
         })
         seen = 0
         for lg in logs:
             ev = scan_contract.events.Deposit().process_log(lg)
-            token, recipient, amount = ev['args']['token'], ev['args']['recipient'], ev['args']['amount']
+            token = to_checksum_address(ev['args']['token'])
+            recipient = to_checksum_address(ev['args']['recipient'])
+            amount = ev['args']['amount']
             print(f"[Deposit] token={token} recipient={recipient} amount={amount} blk={lg['blockNumber']}")
             try:
                 txh = send_tx(send_contract.functions.wrap(token, recipient, amount))
@@ -109,17 +115,20 @@ def scan_blocks(chain, contract_info="contract_info.json"):
                 print(f"wrap() failed: {e}")
         if seen == 0: print("No Deposit events in window.")
         return seen
-
     else:
-        topic = Web3.keccak(text="Unwrap(address,address,address,address,uint256)").hex()
+        topic = _hex0x(Web3.keccak(text="Unwrap(address,address,address,address,uint256)").hex())
         logs = w3_scan.eth.get_logs({
-            "fromBlock": from_block, "toBlock": to_block,
-            "address": mine["address"], "topics": [topic],
+            "fromBlock": from_block,
+            "toBlock": to_block,
+            "address": mine_addr,
+            "topics": [topic],
         })
         seen = 0
         for lg in logs:
             ev = scan_contract.events.Unwrap().process_log(lg)
-            underlying, recipient, amount = ev['args']['underlying_token'], ev['args']['to'], ev['args']['amount']
+            underlying = to_checksum_address(ev['args']['underlying_token'])
+            recipient = to_checksum_address(ev['args']['to'])
+            amount = ev['args']['amount']
             print(f"[Unwrap] underlying={underlying} to={recipient} amount={amount} blk={lg['blockNumber']}")
             try:
                 txh = send_tx(send_contract.functions.withdraw(underlying, recipient, amount))
@@ -129,8 +138,6 @@ def scan_blocks(chain, contract_info="contract_info.json"):
                 print(f"withdraw() failed: {e}")
         if seen == 0: print("No Unwrap events in window.")
         return seen
-
-
 
 
         # # Connect to source or destination chain
