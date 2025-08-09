@@ -36,7 +36,6 @@ def get_contract_info(chain, contract_info):
     return contracts[chain]
 
 
-
 def scan_blocks(chain, contract_info="contract_info.json"):
     """
         chain - (string) should be either "source" or "destination"
@@ -54,23 +53,22 @@ def scan_blocks(chain, contract_info="contract_info.json"):
         from pathlib import Path
         import time
 
-        # --- Connect to chains and contracts ---
+        # Connect to scan chain + contract
         w3_scan = connect_to(chain)
-        me = get_contract_info(chain, contract_info)
-        scan_contract = w3_scan.eth.contract(address=me["address"], abi=me["abi"])
+        mine = get_contract_info(chain, contract_info)
+        scan_contract = w3_scan.eth.contract(address=mine["address"], abi=mine["abi"])
 
+        # Opposite chain + contract (where we’ll send tx)
         other_chain = "destination" if chain == "source" else "source"
         w3_send = connect_to(other_chain)
         other = get_contract_info(other_chain, contract_info)
-        relay_contract = w3_send.eth.contract(address=other["address"], abi=other["abi"])
+        send_contract = w3_send.eth.contract(address=other["address"], abi=other["abi"])
 
-        # --- Load warden key from sk.txt ---
-        sk_path = Path(__file__).parent.absolute() / "sk.txt"
-        with open(sk_path, "r") as f:
-            sk = f.readline().strip()
+        # Load warden key (same as Merkle)
+        sk = (Path(__file__).parent.absolute() / "sk.txt").read_text().strip()
         acct = w3_send.eth.account.from_key(sk)
 
-        # --- Helper: safe tx sender on opposite chain ---
+        # Helper to send tx on opposite chain
         def send_tx(fn):
             nonce = w3_send.eth.get_transaction_count(acct.address)
             try:
@@ -89,124 +87,76 @@ def scan_blocks(chain, contract_info="contract_info.json"):
             return txh.hex()
 
         latest = w3_scan.eth.block_number
+        from_block = max(latest - 20, 0)
+        to_block = latest
 
-        # Scan window and chunk size tuned to RPC limits
-        DEPTH = 15000 if chain == 'source' else 4000  # Fuji can tolerate more than BSC
-        CHUNK = 512 if chain == 'destination' else 1024  # smaller chunks for BSC
-        start = max(latest - DEPTH, 0)
-        end = latest
-
-        # --- Build topics and ABI handlers ---
-        if chain == 'source':
-            # Source emits Deposit(address,address,uint256)
-            event_abi = None
-            for e in me["abi"]:
-                if e.get("type") == "event" and e.get("name") == "Deposit":
-                    event_abi = e
-                    break
-            if event_abi is None:
-                print("Deposit ABI not found")
+        if chain == "source":
+            # Deposit(address,address,uint256)
+            topic = Web3.keccak(text="Deposit(address,address,uint256)").hex()
+            print(f"[scan] SOURCE blocks {from_block}..{to_block} for Deposit on {mine['address']}")
+            try:
+                logs = w3_scan.eth.get_logs({
+                    "fromBlock": from_block,
+                    "toBlock": to_block,
+                    "address": mine["address"],
+                    "topics": [topic],
+                })
+            except Exception as e:
+                print(f"Deposit fetch error: {e}")
                 return 0
-            sig = Web3.keccak(text="Deposit(address,address,uint256)").hex()
-            topics = [sig]
 
-            print(f"Scanning SOURCE blocks {start}..{end} for Deposit")
-            found = 0
+            count = 0
+            for lg in logs:
+                evt = scan_contract.events.Deposit().process_log(lg)
+                token = evt['args']['token']
+                recipient = evt['args']['recipient']
+                amount = evt['args']['amount']
+                print(f"[Deposit] token={token} recipient={recipient} amount={amount} (blk {lg['blockNumber']})")
 
-            # Chunked get_logs
-            cur = start
-            while cur <= end:
-                lo = cur
-                hi = min(cur + CHUNK - 1, end)
                 try:
-                    logs = w3_scan.eth.get_logs({
-                        "fromBlock": lo,
-                        "toBlock": hi,
-                        "address": me["address"],
-                        "topics": topics
-                    })
-                except Exception as e:
-                    print(f"Deposit fetch error [{lo}-{hi}]: {e}")
-                    # small backoff to be gentle with RPC
-                    time.sleep(0.5)
-                    cur = hi + 1
-                    continue
+                    txh = send_tx(send_contract.functions.wrap(token, recipient, amount))
+                    print(f"→ wrap() sent on destination: {txh}")
+                    count += 1
+                except Exception as ex:
+                    print(f"wrap() failed: {ex}")
 
-                for lg in logs:
-                    evt = scan_contract.events.Deposit().process_log(lg)
-                    token = evt['args']['token']
-                    recipient = evt['args']['recipient']
-                    amount = evt['args']['amount']
-                    print(f"[Deposit] token={token} recipient={recipient} amount={amount} (blk {lg['blockNumber']})")
-
-                    try:
-                        txh = send_tx(relay_contract.functions.wrap(token, recipient, amount))
-                        print(f"→ wrap() sent on destination: {txh}")
-                        found += 1
-                    except Exception as ex:
-                        print(f"wrap() failed: {ex}")
-
-                # throttle a bit for BSC infra; harmless on Fuji
-                time.sleep(0.15)
-                cur = hi + 1
-
-            if found == 0:
-                print("No Deposit events in the scan window.")
-            return found
+            if count == 0:
+                print("No Deposit events in window.")
+            return count
 
         else:
-            # Destination emits Unwrap(address,address,address,address,uint256)
-            event_abi = None
-            for e in other["abi"]:  # we can also use scan_contract.abi; using me/other is equivalent
-                if e.get("type") == "event" and e.get("name") == "Unwrap":
-                    event_abi = e
-                    break
-            if event_abi is None:
-                print("Unwrap ABI not found")
+            # Unwrap(address,address,address,address,uint256)
+            topic = Web3.keccak(text="Unwrap(address,address,address,address,uint256)").hex()
+            print(f"[scan] DESTINATION blocks {from_block}..{to_block} for Unwrap on {mine['address']}")
+            try:
+                logs = w3_scan.eth.get_logs({
+                    "fromBlock": from_block,
+                    "toBlock": to_block,
+                    "address": mine["address"],
+                    "topics": [topic],
+                })
+            except Exception as e:
+                print(f"Unwrap fetch error: {e}")
                 return 0
-            sig = Web3.keccak(text="Unwrap(address,address,address,address,uint256)").hex()
-            topics = [sig]
 
-            print(f"Scanning DESTINATION blocks {start}..{end} for Unwrap")
-            found = 0
+            count = 0
+            for lg in logs:
+                evt = scan_contract.events.Unwrap().process_log(lg)
+                underlying = evt['args']['underlying_token']
+                recipient = evt['args']['to']
+                amount = evt['args']['amount']
+                print(f"[Unwrap] underlying={underlying} to={recipient} amount={amount} (blk {lg['blockNumber']})")
 
-            cur = start
-            while cur <= end:
-                lo = cur
-                hi = min(cur + CHUNK - 1, end)
                 try:
-                    logs = w3_scan.eth.get_logs({
-                        "fromBlock": lo,
-                        "toBlock": hi,
-                        "address": me["address"],
-                        "topics": topics
-                    })
-                except Exception as e:
-                    print(f"Unwrap fetch error [{lo}-{hi}]: {e}")
-                    time.sleep(0.75)  # BSC rate limit is stricter
-                    cur = hi + 1
-                    continue
+                    txh = send_tx(send_contract.functions.withdraw(underlying, recipient, amount))
+                    print(f"→ withdraw() sent on source: {txh}")
+                    count += 1
+                except Exception as ex:
+                    print(f"withdraw() failed: {ex}")
 
-                for lg in logs:
-                    evt = scan_contract.events.Unwrap().process_log(lg)
-                    underlying = evt['args']['underlying_token']
-                    recipient = evt['args']['to']
-                    amount = evt['args']['amount']
-                    print(f"[Unwrap] underlying={underlying} to={recipient} amount={amount} (blk {lg['blockNumber']})")
-
-                    try:
-                        txh = send_tx(relay_contract.functions.withdraw(underlying, recipient, amount))
-                        print(f"→ withdraw() sent on source: {txh}")
-                        found += 1
-                    except Exception as ex:
-                        print(f"withdraw() failed: {ex}")
-
-                time.sleep(0.25)
-                cur = hi + 1
-
-            if found == 0:
-                print("No Unwrap events in the scan window.")
-            return found
+            if count == 0:
+                print("No Unwrap events in window.")
+            return count
 
 
 
