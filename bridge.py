@@ -90,7 +90,7 @@ def scan_blocks(chain, contract_info="contract_info.json"):
         txh = w3_send.eth.send_raw_transaction(signed.raw_transaction)  # web3.py v6 attribute
         # NEW: wait so the grader can see the event right after our call returns
         try:
-            w3_send.eth.wait_for_transaction_receipt(txh, timeout=20)
+            w3_send.eth.wait_for_transaction_receipt(txh, timeout=30)
         except Exception:
             # even if timeout, return hash so we can log it
             pass
