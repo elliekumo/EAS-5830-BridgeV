@@ -49,114 +49,81 @@ def scan_blocks(chain, contract_info="contract_info.json"):
         print(f"Invalid chain: {chain}")
         return 0
 
-        # YOUR CODE HERE
-        from pathlib import Path
-        import time
+    # YOUR CODE HERE
+    from pathlib import Path
 
-        # Connect to scan chain + contract
-        w3_scan = connect_to(chain)
-        mine = get_contract_info(chain, contract_info)
-        scan_contract = w3_scan.eth.contract(address=mine["address"], abi=mine["abi"])
+    w3_scan = connect_to(chain)
+    mine = get_contract_info(chain, contract_info)
+    scan_contract = w3_scan.eth.contract(address=mine["address"], abi=mine["abi"])
 
-        # Opposite chain + contract (where we’ll send tx)
-        other_chain = "destination" if chain == "source" else "source"
-        w3_send = connect_to(other_chain)
-        other = get_contract_info(other_chain, contract_info)
-        send_contract = w3_send.eth.contract(address=other["address"], abi=other["abi"])
+    other_chain = "destination" if chain == "source" else "source"
+    w3_send = connect_to(other_chain)
+    other = get_contract_info(other_chain, contract_info)
+    send_contract = w3_send.eth.contract(address=other["address"], abi=other["abi"])
 
-        # Load warden key (same as Merkle)
-        sk = (Path(__file__).parent.absolute() / "sk.txt").read_text().strip()
-        acct = w3_send.eth.account.from_key(sk)
+    sk = (Path(__file__).parent.absolute() / "sk.txt").read_text().strip()
+    if sk.startswith("0x"): sk = sk[2:]
+    acct = w3_send.eth.account.from_key(sk)
 
-        # Helper to send tx on opposite chain
-        def send_tx(fn):
-            nonce = w3_send.eth.get_transaction_count(acct.address)
+    def send_tx(fn):
+        nonce = w3_send.eth.get_transaction_count(acct.address)
+        try:
+            gas_est = fn.estimate_gas({'from': acct.address})
+        except Exception:
+            gas_est = 500_000
+        tx = fn.build_transaction({
+            'from': acct.address,
+            'nonce': nonce,
+            'gas': int(gas_est * 1.2),
+            'gasPrice': w3_send.eth.gas_price,
+            'chainId': w3_send.eth.chain_id
+        })
+        signed = w3_send.eth.account.sign_transaction(tx, acct.key)
+        return w3_send.eth.send_raw_transaction(signed.rawTransaction).hex()
+
+    latest = w3_scan.eth.block_number
+    from_block = max(latest - 20, 0)
+    to_block = latest
+
+    if chain == "source":
+        topic = Web3.keccak(text="Deposit(address,address,uint256)").hex()
+        logs = w3_scan.eth.get_logs({
+            "fromBlock": from_block, "toBlock": to_block,
+            "address": mine["address"], "topics": [topic],
+        })
+        seen = 0
+        for lg in logs:
+            ev = scan_contract.events.Deposit().process_log(lg)
+            token, recipient, amount = ev['args']['token'], ev['args']['recipient'], ev['args']['amount']
+            print(f"[Deposit] token={token} recipient={recipient} amount={amount} blk={lg['blockNumber']}")
             try:
-                gas_est = fn.estimate_gas({'from': acct.address})
-            except Exception:
-                gas_est = 500_000
-            tx = fn.build_transaction({
-                'from': acct.address,
-                'nonce': nonce,
-                'gas': int(gas_est * 1.2),
-                'gasPrice': w3_send.eth.gas_price,
-                'chainId': w3_send.eth.chain_id
-            })
-            signed = w3_send.eth.account.sign_transaction(tx, acct.key)
-            txh = w3_send.eth.send_raw_transaction(signed.rawTransaction)
-            return txh.hex()
-
-        latest = w3_scan.eth.block_number
-        from_block = max(latest - 20, 0)
-        to_block = latest
-
-        if chain == "source":
-            # Deposit(address,address,uint256)
-            topic = Web3.keccak(text="Deposit(address,address,uint256)").hex()
-            print(f"[scan] SOURCE blocks {from_block}..{to_block} for Deposit on {mine['address']}")
-            try:
-                logs = w3_scan.eth.get_logs({
-                    "fromBlock": from_block,
-                    "toBlock": to_block,
-                    "address": mine["address"],
-                    "topics": [topic],
-                })
+                txh = send_tx(send_contract.functions.wrap(token, recipient, amount))
+                print(f"→ wrap(): {txh}")
+                seen += 1
             except Exception as e:
-                print(f"Deposit fetch error: {e}")
-                return 0
+                print(f"wrap() failed: {e}")
+        if seen == 0: print("No Deposit events in window.")
+        return seen
 
-            count = 0
-            for lg in logs:
-                evt = scan_contract.events.Deposit().process_log(lg)
-                token = evt['args']['token']
-                recipient = evt['args']['recipient']
-                amount = evt['args']['amount']
-                print(f"[Deposit] token={token} recipient={recipient} amount={amount} (blk {lg['blockNumber']})")
-
-                try:
-                    txh = send_tx(send_contract.functions.wrap(token, recipient, amount))
-                    print(f"→ wrap() sent on destination: {txh}")
-                    count += 1
-                except Exception as ex:
-                    print(f"wrap() failed: {ex}")
-
-            if count == 0:
-                print("No Deposit events in window.")
-            return count
-
-        else:
-            # Unwrap(address,address,address,address,uint256)
-            topic = Web3.keccak(text="Unwrap(address,address,address,address,uint256)").hex()
-            print(f"[scan] DESTINATION blocks {from_block}..{to_block} for Unwrap on {mine['address']}")
+    else:
+        topic = Web3.keccak(text="Unwrap(address,address,address,address,uint256)").hex()
+        logs = w3_scan.eth.get_logs({
+            "fromBlock": from_block, "toBlock": to_block,
+            "address": mine["address"], "topics": [topic],
+        })
+        seen = 0
+        for lg in logs:
+            ev = scan_contract.events.Unwrap().process_log(lg)
+            underlying, recipient, amount = ev['args']['underlying_token'], ev['args']['to'], ev['args']['amount']
+            print(f"[Unwrap] underlying={underlying} to={recipient} amount={amount} blk={lg['blockNumber']}")
             try:
-                logs = w3_scan.eth.get_logs({
-                    "fromBlock": from_block,
-                    "toBlock": to_block,
-                    "address": mine["address"],
-                    "topics": [topic],
-                })
+                txh = send_tx(send_contract.functions.withdraw(underlying, recipient, amount))
+                print(f"→ withdraw(): {txh}")
+                seen += 1
             except Exception as e:
-                print(f"Unwrap fetch error: {e}")
-                return 0
-
-            count = 0
-            for lg in logs:
-                evt = scan_contract.events.Unwrap().process_log(lg)
-                underlying = evt['args']['underlying_token']
-                recipient = evt['args']['to']
-                amount = evt['args']['amount']
-                print(f"[Unwrap] underlying={underlying} to={recipient} amount={amount} (blk {lg['blockNumber']})")
-
-                try:
-                    txh = send_tx(send_contract.functions.withdraw(underlying, recipient, amount))
-                    print(f"→ withdraw() sent on source: {txh}")
-                    count += 1
-                except Exception as ex:
-                    print(f"withdraw() failed: {ex}")
-
-            if count == 0:
-                print("No Unwrap events in window.")
-            return count
+                print(f"withdraw() failed: {e}")
+        if seen == 0: print("No Unwrap events in window.")
+        return seen
 
 
 
