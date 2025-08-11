@@ -97,9 +97,9 @@ def scan_blocks(chain, contract_info="contract_info.json"):
             pass
         return tx_hash.hex()
 
-    latest = w3_scan.eth.block_number
-    from_block = max(latest - 12, 0)
-    to_block = latest
+    # latest = w3_scan.eth.block_number
+    # from_block = max(latest - 12, 0)
+    # to_block = latest
 
     seen = 0
 
@@ -107,7 +107,7 @@ def scan_blocks(chain, contract_info="contract_info.json"):
         # one call returns ALL Deposit events in the range
         try:
             ev_filter = scan_contract.events.Deposit.create_filter(
-                fromBlock=from_block, toBlock=to_block
+                from_Block='latest', argument_filters={}
             )
             events = ev_filter.get_all_entries()
         except Exception as e:
@@ -134,7 +134,7 @@ def scan_blocks(chain, contract_info="contract_info.json"):
         # one call returns ALL Unwrap events in the range
         try:
             ev_filter = scan_contract.events.Unwrap.create_filter(
-                fromBlock=from_block, toBlock=to_block
+                from_Block='latest', argument_filters={}
             )
             events = ev_filter.get_all_entries()
         except Exception as e:
