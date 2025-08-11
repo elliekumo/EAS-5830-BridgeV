@@ -6,6 +6,7 @@ from datetime import datetime
 import json
 import pandas as pd
 from eth_utils import to_checksum_address
+from time import sleep
 
 
 def connect_to(chain):
@@ -87,69 +88,78 @@ def scan_blocks(chain, contract_info="contract_info.json"):
             'chainId': w3_send.eth.chain_id,
         })
         signed = w3_send.eth.account.sign_transaction(tx, acct.key)
-        txh = w3_send.eth.send_raw_transaction(signed.raw_transaction)
+        tx_hash = w3_send.eth.send_raw_transaction(signed.rawTransaction)
 
         try:
-            w3_send.eth.wait_for_transaction_receipt(txh, timeout=30)
+            w3_send.eth.wait_for_transaction_receipt(tx_hash, timeout=45)
         except Exception:
             #even if timeout, return hash so we can log it
             pass
-        return txh.hex()
+        return tx_hash.hex()
 
     latest = w3_scan.eth.block_number
     from_block = max(latest - 12, 0)
     to_block = latest
 
+    seen = 0
+
     if chain == "source":
-        topic = _hex0x(Web3.keccak(text="Deposit(address,address,uint256)").hex())
-        logs = w3_scan.eth.get_logs({
-            'fromBlock': from_block,
-            'toBlock': to_block,
-            'address': mine_addr,
-            'topics': [topic],
-        })
-        seen = 0
-        for lg in logs:
-            ev = scan_contract.events.Deposit().process_log(lg)
+        # one call returns ALL Deposit events in the range
+        try:
+            ev_filter = scan_contract.events.Deposit.create_filter(
+                fromBlock=from_block, toBlock=to_block
+            )
+            events = ev_filter.get_all_entries()
+        except Exception as e:
+            print(f"Deposit fetch failed: {getattr(e, 'args', e)}")
+            return 0
+
+        if not events:
+            print("No Deposit events in window.")
+            return 0
+
+        for ev in events:
             token = to_checksum_address(ev['args']['token'])
             recipient = to_checksum_address(ev['args']['recipient'])
             amount = ev['args']['amount']
-            print(f"[Deposit] token={token} recipient={recipient} amount={amount} blk={lg['blockNumber']}")
+            print(f"[Deposit] token={token} recipient={recipient} amount={amount} blk={ev['blockNumber']}")
             try:
                 txh = send_tx(send_contract.functions.wrap(token, recipient, amount))
                 print(f"-> wrap() succeed: {txh}")
                 seen += 1
             except Exception as e:
-                print(f"-> wrap() failed: {e}")
-        if seen == 0: print("No Deposit events in window.")
-        return seen
+                print(f"-> wrap() failed: {getattr(e, 'args', e)}")
 
     else:
-        topic = _hex0x(Web3.keccak(text="Unwrap(address,address,address,address,uint256)").hex())
-        logs = w3_scan.eth.get_logs({
-            'fromBlock': from_block,
-            'toBlock': to_block,
-            'address': mine_addr,
-            'topics': [topic],
-        })
-        seen = 0
-        for lg in logs:
-            ev = scan_contract.events.Unwrap().process_log(lg)
+        # one call returns ALL Unwrap events in the range
+        try:
+            ev_filter = scan_contract.events.Unwrap.create_filter(
+                fromBlock=from_block, toBlock=to_block
+            )
+            events = ev_filter.get_all_entries()
+        except Exception as e:
+            print(f"Unwrap fetch failed: {getattr(e, 'args', e)}")
+            return 0
+
+        if not events:
+            print("No Unwrap events in window.")
+            return 0
+
+        for ev in events:
             underlying = to_checksum_address(ev['args']['underlying_token'])
             recipient = to_checksum_address(ev['args']['to'])
             amount = ev['args']['amount']
-            print(f"[Unwrap] underlying={underlying} to={recipient} amount={amount} blk={lg['blockNumber']}")
+            print(f"[Unwrap] underlying={underlying} to={recipient} amount={amount} blk={ev['blockNumber']}")
             try:
                 txh = send_tx(send_contract.functions.withdraw(underlying, recipient, amount))
                 print(f"-> withdraw() succeed: {txh}")
                 seen += 1
             except Exception as e:
-                print(f"-> withdraw() failed: {e}")
-        if seen == 0: print("No Unwrap events in window.")
-        return seen
+                print(f"-> withdraw() failed: {getattr(e, 'args', e)}")
 
-
-
+    if seen == 0:
+        print("No matching events in window.")
+    return seen
 
 
 if __name__ == "__main__":
