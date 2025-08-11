@@ -107,7 +107,7 @@ def scan_blocks(chain, contract_info="contract_info.json"):
         # one call returns ALL Deposit events in the range
         try:
             ev_filter = scan_contract.events.Deposit.create_filter(
-                from_Block='latest', argument_filters={}
+                from_block='latest', argument_filters={}
             )
             events = ev_filter.get_all_entries()
         except Exception as e:
@@ -134,7 +134,7 @@ def scan_blocks(chain, contract_info="contract_info.json"):
         # one call returns ALL Unwrap events in the range
         try:
             ev_filter = scan_contract.events.Unwrap.create_filter(
-                from_Block='latest', argument_filters={}
+                from_block='latest', argument_filters={}
             )
             events = ev_filter.get_all_entries()
         except Exception as e:
